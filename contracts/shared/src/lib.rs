@@ -5,12 +5,14 @@ mod coupon_pause;
 mod jurisdiction_versioning;
 mod settlement_reconciliation;
 mod methodology_snapshot;
+mod rejection_explanation;
 pub use errors::*;
 pub use types::*;
 pub use coupon_pause::*;
 pub use jurisdiction_versioning::*;
 pub use settlement_reconciliation::*;
 pub use methodology_snapshot::*;
+pub use rejection_explanation::*;
 
 #[cfg(test)]
 mod tests;

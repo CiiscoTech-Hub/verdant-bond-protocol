@@ -263,3 +263,153 @@ fn test_verify_integrity() {
     };
     assert!(!snapshots.verify_integrity(&invalid));
 }
+
+// ─── Investor Rejection Explanation Tests ───────────────────────────────────
+
+#[test]
+fn test_rejection_explanation_normal_path() {
+    let env = setup_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    let mut manager = RejectionExplanationManager::new(&env, admin.clone());
+
+    // Record KYC expired rejection
+    let record = manager
+        .record_or_retry(
+            &env,
+            ActionType::Subscription,
+            investor.clone(),
+            101,
+            RejectionCode::KycExpired,
+        )
+        .unwrap();
+
+    assert_eq!(record.explanation_id, 1);
+    assert_eq!(record.action_type, ActionType::Subscription);
+    assert_eq!(record.category, RejectionCategory::IdentityAndKyc);
+    assert_eq!(record.code, RejectionCode::KycExpired);
+    assert_eq!(record.remediation_type, RemediationType::DocumentUpload);
+    assert!(record.is_retryable);
+    assert_eq!(record.retry_count, 0);
+
+    // Retrieve via investor caller
+    let fetched = manager.get_explanation(&investor, 1).unwrap();
+    assert_eq!(fetched.explanation_id, 1);
+    assert_eq!(fetched.bond_id, 101);
+
+    // Retrieve via admin caller
+    let admin_fetched = manager.get_explanation(&admin, 1).unwrap();
+    assert_eq!(admin_fetched.explanation_id, 1);
+}
+
+#[test]
+fn test_rejection_explanation_retry_path_idempotency() {
+    let env = setup_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    let mut manager = RejectionExplanationManager::new(&env, admin);
+
+    // First rejection
+    let rec1 = manager
+        .record_or_retry(
+            &env,
+            ActionType::SecondaryTransfer,
+            investor.clone(),
+            202,
+            RejectionCode::OfferingCapExceeded,
+        )
+        .unwrap();
+    assert_eq!(rec1.explanation_id, 1);
+    assert_eq!(rec1.retry_count, 0);
+
+    // Retry rejection under identical parameters
+    let rec2 = manager
+        .record_or_retry(
+            &env,
+            ActionType::SecondaryTransfer,
+            investor.clone(),
+            202,
+            RejectionCode::OfferingCapExceeded,
+        )
+        .unwrap();
+    assert_eq!(rec2.explanation_id, 1); // Preserves original ID
+    assert_eq!(rec2.retry_count, 1);
+
+    // Third retry
+    let rec3 = manager
+        .record_or_retry(
+            &env,
+            ActionType::SecondaryTransfer,
+            investor.clone(),
+            202,
+            RejectionCode::OfferingCapExceeded,
+        )
+        .unwrap();
+    assert_eq!(rec3.explanation_id, 1);
+    assert_eq!(rec3.retry_count, 2);
+}
+
+#[test]
+fn test_rejection_explanation_failure_path_validation() {
+    let env = setup_env();
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+
+    let mut manager = RejectionExplanationManager::new(&env, admin.clone());
+
+    // Zero bond ID is rejected
+    let err_zero = manager.record_or_retry(
+        &env,
+        ActionType::Subscription,
+        investor.clone(),
+        0,
+        RejectionCode::KycRequired,
+    );
+    assert_eq!(err_zero.err(), Some(RejectionError::ZeroBondId));
+
+    // Non-existent explanation ID
+    env.mock_all_auths();
+    let err_not_found = manager.get_explanation(&investor, 999);
+    assert_eq!(err_not_found.err(), Some(RejectionError::ExplanationNotFound));
+}
+
+#[test]
+fn test_rejection_explanation_authorization_path() {
+    let env = setup_env();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let investor = Address::generate(&env);
+    let eavesdropper = Address::generate(&env);
+
+    let mut manager = RejectionExplanationManager::new(&env, admin.clone());
+
+    let record = manager
+        .record_or_retry(
+            &env,
+            ActionType::TrancheAcquisition,
+            investor.clone(),
+            303,
+            RejectionCode::AccreditationRequired,
+        )
+        .unwrap();
+
+    // Unauthorized third party is blocked
+    let err_unauth = manager.get_explanation(&eavesdropper, record.explanation_id);
+    assert_eq!(err_unauth.err(), Some(RejectionError::Unauthorized));
+
+    let err_last_unauth = manager.get_last_investor_rejection(&eavesdropper, &investor);
+    assert_eq!(err_last_unauth.err(), Some(RejectionError::Unauthorized));
+
+    // Authorized investor succeeds
+    let ok_investor = manager.get_last_investor_rejection(&investor, &investor);
+    assert!(ok_investor.is_ok());
+
+    // Authorized admin succeeds
+    let ok_admin = manager.get_last_investor_rejection(&admin, &investor);
+    assert!(ok_admin.is_ok());
+}
+
