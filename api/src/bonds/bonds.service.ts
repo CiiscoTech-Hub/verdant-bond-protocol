@@ -15,6 +15,7 @@ import { SubscribeDto } from './dto/subscribe.dto';
 import { DistributeCouponDto } from './dto/distribute-coupon.dto';
 import { ClaimCreditsDto } from './dto/claim-credits.dto';
 import { TransferBondDto } from './dto/transfer-bond.dto';
+import { RedeemBondDto } from './dto/redeem-bond.dto';
 import { nativeToScVal, scValToNative, Address, xdr } from '@stellar/stellar-sdk';
 import * as crypto from 'crypto';
 import {
@@ -29,6 +30,7 @@ import {
   TransferResponse,
   UndistributedTotalResponse,
   SweepUndistributedResponse,
+  RedeemResponse,
   BondStatusEnum,
   BondMaturityStatusEnum,
   CreditTypeEnum,
@@ -615,6 +617,37 @@ export class BondsService {
     await this.complianceSnapshots?.capture(`bond:${id}:matured`, 'BOND_MATURED', id,
       { bond, transactionHash });
     return bond;
+  }
+
+  async redeem(id: number, dto: RedeemBondDto): Promise<RedeemResponse> {
+    const investorSecret = this.signingKeys.investorSecret();
+    const nonce = await this.nonceService.next(this.configService.getBondIssuerAddress(), dto.investorAddress);
+
+    let transactionHash: string | undefined;
+    try {
+      ({ transactionHash } = await this.contractService.invokeContractMethod(
+        this.configService.getBondIssuerAddress(), 'redeem', investorSecret,
+        [
+          Address.fromString(dto.investorAddress).toScVal(),
+          nativeToScVal(BigInt(id), { type: 'u64' }),
+          nativeToScVal(BigInt(dto.amount), { type: 'i128' }),
+        ],
+        dto.investorAddress,
+      ));
+    } catch (error) {
+      throw this.mapBondError(error, id);
+    }
+
+    this.invalidatePortfolio(dto.investorAddress);
+    await this.redis.del(`bond:${id}`);
+
+    return {
+      bondId: id,
+      investorAddress: dto.investorAddress,
+      amount: toBigIntString(dto.amount),
+      transactionHash: transactionHash || '',
+      status: 'Redeemed',
+    };
   }
 
   private encodeBondConfig(dto: CreateBondDto): xdr.ScVal {
